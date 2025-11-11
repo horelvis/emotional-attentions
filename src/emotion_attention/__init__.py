@@ -1,12 +1,13 @@
 """Emotional attention package with Plutchik-aligned adapters."""
 
-from .data import get_vocab_and_pairs, build_batch
+from .data import ensure_special_tokens, create_dataloader, SpecialTokenIds
 from .model import EmoDecoder, DualHeadEmoAttention, EmoAdapter
 from .utils import shift_targets, cosine_loss
 
 __all__ = [
-    "get_vocab_and_pairs",
-    "build_batch",
+    "ensure_special_tokens",
+    "create_dataloader",
+    "SpecialTokenIds",
     "EmoDecoder",
     "DualHeadEmoAttention",
     "EmoAdapter",

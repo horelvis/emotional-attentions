@@ -37,8 +37,3 @@ def make_masks(X: torch.Tensor, sep_id: int, pad_id: int) -> tuple[torch.Tensor,
         out_mask[b, sep_pos + 1 :] = X[b, sep_pos + 1 :] != pad_id
     return pad, in_mask, out_mask
 
-
-def decode(ids: List[int], itos: dict[int, str]) -> str:
-    special = {"<pad>", "<bos>"}
-    toks = [itos[int(i)] for i in ids if itos[int(i)] not in special]
-    return " ".join(toks)

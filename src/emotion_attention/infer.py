@@ -5,66 +5,83 @@ import json
 from typing import List
 
 import torch
+from transformers import AutoTokenizer
 
-from .data import build_batch, encode
+from .data import ensure_special_tokens, SpecialTokenIds
 from .model import EmoDecoder
-from .utils import decode, make_masks, sample_topk
+from .utils import make_masks, sample_topk
 
 
 def parse_args():
-    p = argparse.ArgumentParser(description="Generate responses and alignment scores")
+    p = argparse.ArgumentParser(description="Generate emotional responses with adapters")
     p.add_argument('--checkpoint', type=str, default='artifacts/emo_decoder.pt')
-    p.add_argument('--input', type=str, required=True, help='Entrada separada por espacios')
-    p.add_argument('--max-new', type=int, default=12)
+    p.add_argument('--tokenizer-dir', type=str, default='artifacts/tokenizer')
+    p.add_argument('--input', type=str, required=True, help='Entrada del usuario')
+    p.add_argument('--max-new', type=int, default=40)
     p.add_argument('--k', type=int, default=5)
-    p.add_argument('--temp', type=float, default=0.9)
-    p.add_argument('--ema-alpha', type=float, default=0.15)
+    p.add_argument('--temp', type=float, default=0.8)
+    p.add_argument('--ema-alpha', type=float, default=0.1)
+    p.add_argument('--max-length', type=int, default=256)
     return p.parse_args()
 
 
-def load_model(path: str, device: torch.device):
+def load_model(path: str, tokenizer_dir: str, device: torch.device):
     ckpt = torch.load(path, map_location=device)
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_dir, use_fast=True)
+    tokenizer, special_ids = ensure_special_tokens(tokenizer)
     config = ckpt['config']
     model = EmoDecoder(**config).to(device)
     model.load_state_dict(ckpt['model'])
-    stoi = ckpt['stoi']
-    itos = {i: tok for i, tok in enumerate(ckpt['itos'])}
     model.eval()
-    return model, stoi, itos
+    saved_special = ckpt.get('special_ids', None)
+    if saved_special:
+        special_ids = SpecialTokenIds(**saved_special)
+    return model, tokenizer, special_ids
 
 
-def infer_g_in(model, words: List[str], stoi, device):
-    ids = [stoi['<bos>']] + encode(words, stoi) + [stoi['<sep>']]
-    X = torch.tensor([ids], device=device)
-    pad, in_mask, out_mask = make_masks(X, stoi['<sep>'], stoi['<pad>'])
-    _, g_in, _, _ = model(X, pad, in_mask, out_mask, return_attn=True)
+def encode_prompt(tokenizer, special_ids, text: str, max_length: int):
+    ids = tokenizer.encode(text.strip(), add_special_tokens=False, truncation=True, max_length=max_length - 2)
+    seq = [special_ids.bos] + ids + [special_ids.sep]
+    return seq
+
+
+def infer_g_in(model, X, special_ids, device):
+    pad, in_mask, out_mask = make_masks(X, special_ids.sep, special_ids.pad)
+    _, g_in, _, _ = model(X.to(device), pad.to(device), in_mask.to(device), out_mask.to(device), return_attn=True)
     return g_in.unsqueeze(1)
 
 
-def generate(model, words, stoi, itos, device, max_new, k, temp, ema_alpha):
-    ids = [stoi['<bos>']] + encode(words, stoi) + [stoi['<sep>']]
+def generate(model, tokenizer, special_ids, prompt_text, device, max_new, k, temp, ema_alpha, max_length):
+    ids = encode_prompt(tokenizer, special_ids, prompt_text, max_length)
     X = torch.tensor([ids], device=device)
-    g_t = infer_g_in(model, words, stoi, device)
+    g_t = infer_g_in(model, X, special_ids, device)
     for _ in range(max_new):
-        pad, in_mask, out_mask = make_masks(X, stoi['<sep>'], stoi['<pad>'])
-        logits, _, _, _ = model(X, pad, in_mask, out_mask, return_attn=False)
+        pad, in_mask, out_mask = make_masks(X, special_ids.sep, special_ids.pad)
+        logits, _, _, _ = model(X, pad.to(device), in_mask.to(device), out_mask.to(device), return_attn=False)
         next_id = sample_topk(logits[0, -1], k=k, temp=temp)
         X = torch.cat([X, torch.tensor([[next_id]], device=device)], dim=1)
-        if next_id == stoi['<eos>']:
+        if next_id == special_ids.eos or X.size(1) >= max_length:
             break
-        pad, in_mask, out_mask = make_masks(X, stoi['<sep>'], stoi['<pad>'])
-        _, _, g_out_step, _ = model(X, pad, in_mask, out_mask, return_attn=False)
+        pad, in_mask, out_mask = make_masks(X, special_ids.sep, special_ids.pad)
+        _, _, g_out_step, _ = model(X, pad.to(device), in_mask.to(device), out_mask.to(device), return_attn=False)
         g_t = (1 - ema_alpha) * g_t + ema_alpha * g_out_step.unsqueeze(1)
-    return X[0].tolist(), decode(X[0].tolist(), itos)
+    decoded = tokenizer.decode(X[0].tolist(), skip_special_tokens=True)
+    return X[0].tolist(), decoded
 
 
-def emo_alignment_score(model, words, gen_ids, stoi, device):
-    g_in = infer_g_in(model, words, stoi, device).squeeze()
+def emo_alignment_score(model, special_ids, tokenizer, prompt_text, gen_ids, device):
+    prompt_ids = encode_prompt(tokenizer, special_ids, prompt_text, len(gen_ids))
+    X_prompt = torch.tensor([prompt_ids], device=device)
+    g_in = infer_g_in(model, X_prompt, special_ids, device).squeeze(0)
     toks = gen_ids
-    sep_id = stoi['<sep>']
-    eos_id = stoi['<eos>']
-    start = toks.index(sep_id) + 1 if sep_id in toks else max(1, len(toks) // 2)
-    end = toks.index(eos_id) + 1 if eos_id in toks else len(toks)
+    if special_ids.sep in toks:
+        start = toks.index(special_ids.sep) + 1
+    else:
+        start = max(1, len(toks) // 2)
+    if special_ids.eos in toks:
+        end = toks.index(special_ids.eos) + 1
+    else:
+        end = len(toks)
     X = torch.tensor([toks[:end]], device=device)
     pad = torch.zeros_like(X).bool()
     in_mask = torch.zeros_like(X).bool()
@@ -80,21 +97,21 @@ def emo_alignment_score(model, words, gen_ids, stoi, device):
 def main():
     args = parse_args()
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    model, stoi, itos = load_model(args.checkpoint, device)
-    words = args.input.strip().split()
+    model, tokenizer, special_ids = load_model(args.checkpoint, args.tokenizer_dir, device)
     gen_ids, decoded = generate(
         model,
-        words,
-        stoi,
-        itos,
+        tokenizer,
+        special_ids,
+        args.input,
         device,
         max_new=args.max_new,
         k=args.k,
         temp=args.temp,
         ema_alpha=args.ema_alpha,
+        max_length=args.max_length,
     )
-    score = emo_alignment_score(model, words, gen_ids, stoi, device)
-    print(json.dumps({'input': words, 'output': decoded, 'alignment': score}, ensure_ascii=False))
+    score = emo_alignment_score(model, special_ids, tokenizer, args.input, gen_ids, device)
+    print(json.dumps({'input': args.input, 'output': decoded, 'alignment': score}, ensure_ascii=False))
 
 
 if __name__ == '__main__':
