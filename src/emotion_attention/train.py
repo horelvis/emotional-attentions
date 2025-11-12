@@ -5,6 +5,8 @@ import math
 import os
 from typing import Sequence
 
+import logging
+
 import torch
 import torch.nn.functional as F
 from transformers import AutoModel, AutoTokenizer
@@ -33,10 +35,11 @@ def parse_args():
     p.add_argument('--save-path', type=str, default='artifacts/emo_decoder.pt')
     p.add_argument('--tokenizer-name', type=str, default='distilroberta-base')
     p.add_argument('--tokenizer-dir', type=str, default='artifacts/tokenizer')
-    p.add_argument('--dataset-name', type=str, default='daily_dialog')
+    p.add_argument('--dataset-name', type=str, default='empathetic_dialogues')
     p.add_argument('--max-length', type=int, default=256)
     p.add_argument('--history-turns', type=int, default=3)
     p.add_argument('--include-neutral', action='store_true')
+    p.add_argument('--log-file', type=str, default='artifacts/train.log')
     return p.parse_args()
 
 
@@ -56,10 +59,28 @@ def teacher_vec_batch(texts: Sequence[str], tok, model, proj, device, max_length
     return proj(h_pool)
 
 
+def setup_logging(log_path: str | None):
+    handlers: list[logging.Handler] = [logging.StreamHandler()]
+    if log_path:
+        log_dir = os.path.dirname(log_path)
+        if log_dir:
+            os.makedirs(log_dir, exist_ok=True)
+        handlers.append(logging.FileHandler(log_path, encoding='utf-8'))
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s | %(levelname)s | %(message)s',
+        handlers=handlers,
+        force=True,
+    )
+
+
 def main():
     args = parse_args()
     torch.manual_seed(args.seed)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+    setup_logging(args.log_file or None)
+    logging.info('Starting training | device=%s | epochs=%d | batch_size=%d', device, args.epochs, args.batch_size)
 
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_name, use_fast=True)
     tokenizer, special_ids = ensure_special_tokens(tokenizer)
@@ -155,7 +176,7 @@ def main():
             total_sparse += L_sparse.item()
 
         steps = len(train_loader)
-        print(
+        logging.info(
             f"Ep{ep:02d} | loss={total_loss/steps:.3f} | LM={total_lm/steps:.3f} | "
             f"PROP={total_prop/steps:.3f} | DISTIL={total_distil/steps:.3f} | SP={total_sparse/steps:.4f}"
         )
@@ -182,7 +203,12 @@ def main():
                 val_prop += L_prop_v.item()
                 val_steps += 1
             ppl = math.exp(min(10, val_lm / max(val_steps, 1)))
-            print(f"          | val_LM={val_lm/max(val_steps,1):.3f} | val_PROP={val_prop/max(val_steps,1):.3f} | PPL={ppl:.2f}")
+            logging.info(
+                "          | val_LM=%.3f | val_PROP=%.3f | PPL=%.2f",
+                val_lm / max(val_steps, 1),
+                val_prop / max(val_steps, 1),
+                ppl,
+            )
 
     os.makedirs(os.path.dirname(args.save_path), exist_ok=True)
     torch.save(
@@ -194,7 +220,7 @@ def main():
         },
         args.save_path,
     )
-    print(f"Saved checkpoint to {args.save_path}")
+    logging.info('Saved checkpoint to %s', args.save_path)
 
 
 if __name__ == '__main__':

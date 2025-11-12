@@ -2,8 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
-from typing import List
-
+import sys
 import torch
 from transformers import AutoTokenizer
 
@@ -16,13 +15,20 @@ def parse_args():
     p = argparse.ArgumentParser(description="Generate emotional responses with adapters")
     p.add_argument('--checkpoint', type=str, default='artifacts/emo_decoder.pt')
     p.add_argument('--tokenizer-dir', type=str, default='artifacts/tokenizer')
-    p.add_argument('--input', type=str, required=True, help='Entrada del usuario')
+    p.add_argument('--input', type=str, help='Entrada del usuario')
     p.add_argument('--max-new', type=int, default=40)
     p.add_argument('--k', type=int, default=5)
     p.add_argument('--temp', type=float, default=0.8)
     p.add_argument('--ema-alpha', type=float, default=0.1)
     p.add_argument('--max-length', type=int, default=256)
     return p.parse_args()
+
+
+DEFAULT_PROMPT = (
+    "USER: hola necesito ayuda con un problema familiar muy complicado BOT: claro dime más "
+    "USER: llevo semanas intentando hablar pero no me entienden y me siento aislado BOT: entiendo debe ser duro "
+    "USER: cada conversación termina en discusiones y estoy agotado"
+)
 
 
 def load_model(path: str, tokenizer_dir: str, device: torch.device):
@@ -94,15 +100,37 @@ def emo_alignment_score(model, special_ids, tokenizer, prompt_text, gen_ids, dev
     return float((gi * go).sum().clamp(-1, 1))
 
 
+def resolve_user_input(cli_input: str | None, stdin_stream=None) -> str:
+    if cli_input and cli_input.strip():
+        return cli_input.strip()
+    if stdin_stream is None:
+        stdin_stream = sys.stdin
+    is_tty = bool(getattr(stdin_stream, 'isatty', lambda: False)())
+    if not is_tty:
+        data = stdin_stream.read().strip()
+        if data:
+            return data
+    if stdin_stream is sys.stdin:
+        print("Introduce el historial o mensaje del usuario:", file=sys.stderr)
+        try:
+            line = input().strip()
+        except EOFError:
+            line = ""
+        if line:
+            return line
+    return DEFAULT_PROMPT
+
+
 def main():
     args = parse_args()
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model, tokenizer, special_ids = load_model(args.checkpoint, args.tokenizer_dir, device)
+    user_text = resolve_user_input(args.input)
     gen_ids, decoded = generate(
         model,
         tokenizer,
         special_ids,
-        args.input,
+        user_text,
         device,
         max_new=args.max_new,
         k=args.k,
@@ -110,8 +138,8 @@ def main():
         ema_alpha=args.ema_alpha,
         max_length=args.max_length,
     )
-    score = emo_alignment_score(model, special_ids, tokenizer, args.input, gen_ids, device)
-    print(json.dumps({'input': args.input, 'output': decoded, 'alignment': score}, ensure_ascii=False))
+    score = emo_alignment_score(model, special_ids, tokenizer, user_text, gen_ids, device)
+    print(json.dumps({'input': user_text, 'output': decoded, 'alignment': score}, ensure_ascii=False))
 
 
 if __name__ == '__main__':

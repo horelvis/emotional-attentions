@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import os
+import os
+from collections import defaultdict
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 import torch
 from datasets import load_dataset
@@ -18,6 +21,67 @@ EMOTION_LABELS = {
     6: "surprise",
     7: "other",
 }
+
+EMOTION_ALIAS = {
+    # Neutral / balanced
+    'neutral': 0,
+    'content': 0,
+    'prepared': 0,
+    'confident': 0,
+    'trusting': 0,
+    'calm': 0,
+    # Anger
+    'angry': 1,
+    'annoyed': 1,
+    'furious': 1,
+    'jealous': 1,
+    # Disgust
+    'disgusted': 2,
+    # Fear
+    'afraid': 3,
+    'terrified': 3,
+    'anxious': 3,
+    'apprehensive': 3,
+    'nervous': 3,
+    'worried': 3,
+    # Joy / positive affect
+    'joyful': 4,
+    'happy': 4,
+    'excited': 4,
+    'anticipating': 4,
+    'hopeful': 4,
+    'grateful': 4,
+    'impressed': 4,
+    'proud': 4,
+    'caring': 4,
+    'faithful': 4,
+    # Sadness related
+    'sad': 5,
+    'devastated': 5,
+    'disappointed': 5,
+    'lonely': 5,
+    'guilty': 5,
+    'ashamed': 5,
+    'embarrassed': 5,
+    'sentimental': 5,
+    'nostalgic': 5,
+    # Surprise
+    'surprised': 6,
+}
+
+
+def extract_emotion_field(row: Dict) -> str:
+    value = row.get('emotion')
+    if value is None:
+        value = row.get('context')
+    if isinstance(value, (list, tuple)):
+        return value[0] if value else ''
+    return value or ''
+
+
+def map_emotion_label(label: str) -> Tuple[int, str]:
+    emo_id = EMOTION_ALIAS.get(label.lower(), 7)
+    return emo_id, EMOTION_LABELS.get(emo_id, 'other')
 
 
 @dataclass
@@ -62,27 +126,52 @@ class EmotionConversationDataset(Dataset):
         tokenizer: PreTrainedTokenizerBase,
         special_ids: SpecialTokenIds,
         split: str,
-        dataset_name: str = 'daily_dialog',
+        dataset_name: str = 'empathetic_dialogues',
         history_turns: int = 3,
         max_length: int = 256,
         include_neutral: bool = True,
     ):
-        if dataset_name != 'daily_dialog':
-            raise ValueError('Solo daily_dialog está soportado actualmente')
         self.tokenizer = tokenizer
         self.special = special_ids
         self.max_length = max_length
         self.history_turns = history_turns
-        raw = load_dataset(dataset_name, split=split)
+        token = os.environ.get('HF_TOKEN')
+        load_kwargs = {'split': split}
+        if dataset_name in {'daily_dialog', 'empathetic_dialogues'}:
+            load_kwargs['trust_remote_code'] = True
+        if token:
+            load_kwargs['token'] = token
+        try:
+            raw = load_dataset(dataset_name, **load_kwargs)
+        except TypeError:
+            # Compatibilidad con versiones antiguas de datasets que no aceptan 'token' ni 'trust_remote_code'
+            legacy_kwargs = {'split': split}
+            if token:
+                legacy_kwargs['use_auth_token'] = token
+            raw = load_dataset(dataset_name, **legacy_kwargs)
         self.samples: List[Dict] = []
-        for dialog, emotions in zip(raw['dialog'], raw['emotion']):
-            self._ingest_dialog(dialog, emotions, include_neutral)
+        if dataset_name == 'daily_dialog':
+            for dialog, emotions in zip(raw['dialog'], raw['emotion']):
+                self._ingest_daily_dialog(dialog, emotions, include_neutral)
+        elif dataset_name == 'empathetic_dialogues':
+            conversations: Dict[str, List[Dict]] = defaultdict(list)
+            for row in raw:
+                conversations[row['conv_id']].append(row)
+            for convo in conversations.values():
+                convo.sort(key=lambda x: x['utterance_idx'])
+                self._ingest_empathetic_dialog(convo, include_neutral)
+        else:
+            raise ValueError(f'Dataset {dataset_name} no soportado')
 
     def _format_turn(self, idx: int, text: str) -> str:
         speaker = 'USER' if idx % 2 == 0 else 'BOT'
         return f"{speaker}: {text.strip()}"
 
-    def _ingest_dialog(self, dialog: Sequence[str], emotions: Sequence[int], include_neutral: bool):
+    def _format_turn_with_speaker(self, speaker_idx: int, text: str) -> str:
+        speaker = 'USER' if speaker_idx == 0 else 'BOT'
+        return f"{speaker}: {text.strip()}"
+
+    def _ingest_daily_dialog(self, dialog: Sequence[str], emotions: Sequence[int], include_neutral: bool):
         for turn_idx in range(1, len(dialog)):
             if turn_idx % 2 == 0:
                 continue  # entrenamos solo respuestas del BOT (turnos impares en 0-index)
@@ -93,6 +182,38 @@ class EmotionConversationDataset(Dataset):
             emotion_label = EMOTION_LABELS.get(emotion_id, 'neutral')
             start_idx = max(0, turn_idx - self.history_turns * 2)
             context_turns = [self._format_turn(i, dialog[i]) for i in range(start_idx, turn_idx)]
+            if not context_turns:
+                continue
+            history_text = ' '.join(context_turns)
+            target_text = dialog[turn_idx].strip()
+            sample = self._encode_pair(history_text, target_text)
+            if sample is None:
+                continue
+            sample['emotion_id'] = emotion_id
+            sample['emotion_label'] = emotion_label
+            sample['user_text'] = dialog[user_idx].strip()
+            sample['target_text'] = target_text
+            self.samples.append(sample)
+
+    def _ingest_empathetic_dialog(self, convo: Iterable[Dict], include_neutral: bool):
+        dialog = [row['utterance'] for row in convo]
+        speakers = [row['speaker_idx'] for row in convo]
+        emotions = [extract_emotion_field(row) for row in convo]
+        for turn_idx in range(1, len(dialog)):
+            if speakers[turn_idx] != 1:
+                continue  # consideramos respuestas del oyente como "BOT"
+            user_idx = turn_idx - 1
+            while user_idx >= 0 and speakers[user_idx] == 1:
+                user_idx -= 1
+            if user_idx < 0:
+                continue
+            emotion_id, emotion_label = map_emotion_label(emotions[user_idx])
+            if not include_neutral and emotion_id == 0:
+                continue
+            start_idx = max(0, turn_idx - self.history_turns * 2)
+            context_turns = [
+                self._format_turn_with_speaker(speakers[i], dialog[i]) for i in range(start_idx, turn_idx)
+            ]
             if not context_turns:
                 continue
             history_text = ' '.join(context_turns)

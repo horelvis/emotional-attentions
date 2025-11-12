@@ -1,10 +1,11 @@
-version: "3.9"
 services:
   emo-trainer:
     build: .
     working_dir: /app
     volumes:
       - .:/app
+    env_file:
+      - .env
     command: ["./scripts/run_train.sh"]
 
   emo-infer:
@@ -12,4 +13,19 @@ services:
     working_dir: /app
     volumes:
       - .:/app
+    env_file:
+      - .env
     command: ["./scripts/run_infer.sh", "--input", "estoy triste"]
+
+  emo-api:
+    build: .
+    working_dir: /app
+    volumes:
+      - .:/app
+    env_file:
+      - .env
+    environment:
+      - API_PORT=8000
+    command: ["./scripts/run_api.sh"]
+    ports:
+      - "8000:8000"
