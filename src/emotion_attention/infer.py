@@ -100,7 +100,9 @@ def emo_alignment_score(model, special_ids, tokenizer, prompt_text, gen_ids, dev
     g_out = g_out.squeeze(0)
     gi = torch.nn.functional.normalize(g_in, dim=-1)
     go = torch.nn.functional.normalize(g_out, dim=-1)
-    return float((gi * go).sum().clamp(-1, 1))
+    # Trabajamos con tensores desligados del grafo para evitar warnings during eval.
+    score = (gi * go).sum().clamp(-1, 1).detach()
+    return float(score)
 
 
 def resolve_user_input(cli_input: str | None, stdin_stream=None) -> str:
