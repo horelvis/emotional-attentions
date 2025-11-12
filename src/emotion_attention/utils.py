@@ -32,8 +32,8 @@ def make_masks(X: torch.Tensor, sep_id: int, pad_id: int) -> tuple[torch.Tensor,
     out_mask = torch.zeros_like(X, dtype=torch.bool)
     for b in range(B):
         ids = X[b].tolist()
+        # Si no encontramos <sep>, asumimos que toda la secuencia menos el último token pertenece al historial.
         sep_pos = ids.index(sep_id) if sep_id in ids else max(1, len(ids) - 1)
         in_mask[b, :sep_pos] = True
         out_mask[b, sep_pos + 1 :] = X[b, sep_pos + 1 :] != pad_id
     return pad, in_mask, out_mask
-

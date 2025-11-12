@@ -143,6 +143,7 @@ def main():
             pad_mask = pad_mask.to(device)
             in_mask = in_mask.to(device)
             out_mask = out_mask.to(device)
+            # Desplazamos los ids una posición para alinear entradas y objetivos autoregresivos.
             targets = shift_targets(X)
 
             logits, g_in, g_out, attn = model(X, pad_mask, in_mask, out_mask, return_attn=True)
@@ -155,11 +156,13 @@ def main():
             if args.use_distil and tok_teacher is not None:
                 g_in_hat = teacher_vec_batch(user_texts, tok_teacher, teacher, teacher_proj, device)
                 g_out_hat = teacher_vec_batch(target_texts, tok_teacher, teacher, teacher_proj, device)
+                # Forzamos que las proyecciones aprendidas sigan al modelo profesor para estabilizar la señal emocional.
                 L_distil = F.mse_loss(g_in, g_in_hat) + F.mse_loss(g_out, g_out_hat)
             else:
                 L_distil = torch.tensor(0.0, device=device)
             if attn:
                 sparsity_terms = [a['G'].abs().mean() for a in attn]
+                # Penalizamos compuertas saturadas para favorecer interpretabilidad y usar las pistas solo cuando aportan.
                 L_sparse = torch.stack(sparsity_terms).mean()
             else:
                 L_sparse = torch.tensor(0.0, device=device)

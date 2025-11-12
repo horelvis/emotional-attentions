@@ -38,6 +38,7 @@ def build_openai_client() -> Optional[OpenAI]:
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
         return None
+    # Construimos el cliente solo si contamos con credenciales válidas.
     return OpenAI(api_key=api_key)
 
 
@@ -92,6 +93,7 @@ async def compare_chat(req: ChatRequest):
         k=req.k,
         temp=req.temp,
         ema_alpha=req.ema_alpha,
+        # En modo inferencia limitamos el máximo total para prevenir desbordes.
         max_length=min(req.max_new + 256, 512),
     )
     alignment = emo_alignment_score(model, special_ids, tokenizer, user_text, gen_ids, device)
@@ -109,6 +111,7 @@ async def compare_chat(req: ChatRequest):
             "considerando el tono emocional del usuario."
         )
         try:
+            # Ejecutamos la llamada bloqueante en un hilo para no frenar el loop de FastAPI.
             response = await run_in_threadpool(
                 client.responses.create,
                 model=app.state.openai_model,

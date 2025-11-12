@@ -53,6 +53,7 @@ def encode_prompt(tokenizer, special_ids, text: str, max_length: int):
 
 def infer_g_in(model, X, special_ids, device):
     pad, in_mask, out_mask = make_masks(X, special_ids.sep, special_ids.pad)
+    # Obtenemos la representación emocional de la entrada para reutilizarla durante la generación.
     _, g_in, _, _ = model(X.to(device), pad.to(device), in_mask.to(device), out_mask.to(device), return_attn=True)
     return g_in.unsqueeze(1)
 
@@ -70,6 +71,7 @@ def generate(model, tokenizer, special_ids, prompt_text, device, max_new, k, tem
             break
         pad, in_mask, out_mask = make_masks(X, special_ids.sep, special_ids.pad)
         _, _, g_out_step, _ = model(X, pad.to(device), in_mask.to(device), out_mask.to(device), return_attn=False)
+        # Promedio exponencial para suavizar la representación emocional objetivo.
         g_t = (1 - ema_alpha) * g_t + ema_alpha * g_out_step.unsqueeze(1)
     decoded = tokenizer.decode(X[0].tolist(), skip_special_tokens=True)
     return X[0].tolist(), decoded
@@ -83,6 +85,7 @@ def emo_alignment_score(model, special_ids, tokenizer, prompt_text, gen_ids, dev
     if special_ids.sep in toks:
         start = toks.index(special_ids.sep) + 1
     else:
+        # Si no encontramos el separador, aproximamos la frontera asumiendo mitad de la secuencia.
         start = max(1, len(toks) // 2)
     if special_ids.eos in toks:
         end = toks.index(special_ids.eos) + 1

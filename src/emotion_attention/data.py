@@ -144,7 +144,7 @@ class EmotionConversationDataset(Dataset):
         try:
             raw = load_dataset(dataset_name, **load_kwargs)
         except TypeError:
-            # Compatibilidad con versiones antiguas de datasets que no aceptan 'token' ni 'trust_remote_code'
+            # Compatibilidad con versiones antiguas de datasets que no aceptan 'token' ni 'trust_remote_code'.
             legacy_kwargs = {'split': split}
             if token:
                 legacy_kwargs['use_auth_token'] = token
@@ -203,6 +203,7 @@ class EmotionConversationDataset(Dataset):
             if speakers[turn_idx] != 1:
                 continue  # consideramos respuestas del oyente como "BOT"
             user_idx = turn_idx - 1
+            # Retrocedemos hasta localizar el último turno del hablante original (usuario).
             while user_idx >= 0 and speakers[user_idx] == 1:
                 user_idx -= 1
             if user_idx < 0:
@@ -259,6 +260,7 @@ class BatchCollator:
         B = len(batch)
         X = torch.full((B, max_len), self.special.pad, dtype=torch.long)
         pad_mask = torch.ones((B, max_len), dtype=torch.bool)
+        # PyTorch usa True para ignorar posiciones en la máscara de atención.
         in_mask = torch.zeros((B, max_len), dtype=torch.bool)
         out_mask = torch.zeros((B, max_len), dtype=torch.bool)
         for i, item in enumerate(batch):
@@ -267,8 +269,10 @@ class BatchCollator:
             X[i, :L] = torch.tensor(ids, dtype=torch.long)
             pad_mask[i, :L] = False
             sep_pos = item['sep_pos']
+            # El rango anterior al separador define el historial (entrada del usuario).
             if sep_pos > 1:
                 in_mask[i, 1:sep_pos] = True
+            # El rango posterior al separador (sin eos) marca la respuesta objetivo.
             if L - (sep_pos + 1) > 1:
                 out_mask[i, sep_pos + 1 : L - 1] = True
         input_texts = [item['user_text'] for item in batch]

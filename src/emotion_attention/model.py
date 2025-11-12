@@ -60,6 +60,7 @@ class DualHeadEmoAttention(nn.Module):
         U_proj = self.proj_u(U)
         O_emo = self.emo(U_proj, key_padding_mask=key_padding_mask, causal=True)
         g_proj = self.Wg_g(self.proj_u(g)).expand(H.size(0), H.size(1), -1)
+        # La compuerta aprende cuánto peso dar a la pista semántica (O_sem) frente a la emocional (O_emo).
         G = torch.sigmoid(self.Wg_h(O_sem) + self.Wg_e(O_emo) + g_proj)
         mix = (1 - G) * O_sem + G * O_emo
         out = self.norm(self.out(self.drop(mix)) + H)
@@ -145,5 +146,6 @@ class EmoDecoder(nn.Module):
     def _pool(self, H, mask, head):
         H_masked = H.masked_fill(~mask[..., None], 0.0)
         denom = mask.sum(1).clamp(min=1).view(H.size(0), 1).float()
+        # Promediamos únicamente las posiciones activas del enmascarado para obtener una representación compacta.
         pooled = H_masked.sum(1) / denom
         return head(pooled)
