@@ -6,7 +6,17 @@ from typing import Optional
 import torch
 from fastapi import FastAPI, HTTPException
 from fastapi.concurrency import run_in_threadpool
-from openai import OpenAI
+from fastapi.middleware.cors import CORSMiddleware
+try:
+    from openai import OpenAI
+except (ImportError, ModuleNotFoundError):  # Compatibilidad con SDK < 1.0
+    OpenAI = None
+    try:
+        import openai as openai_legacy  # type: ignore
+    except ImportError:  # pragma: no cover - manejamos ausencia total del paquete
+        openai_legacy = None
+else:
+    openai_legacy = None
 from pydantic import BaseModel
 
 from .infer import (
@@ -34,18 +44,38 @@ class ChatResponse(BaseModel):
     warnings: list[str]
 
 
-def build_openai_client() -> Optional[OpenAI]:
+def build_openai_client() -> Optional[object]:
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
         return None
     # Construimos el cliente solo si contamos con credenciales válidas.
-    return OpenAI(api_key=api_key)
+    if OpenAI is not None:
+        return OpenAI(api_key=api_key)
+    if openai_legacy is not None:
+        openai_legacy.api_key = api_key  # type: ignore[attr-defined]
+        return openai_legacy
+    return None
 
 
 app = FastAPI(
     title="Emotional Attention Chat API",
     version="1.0.0",
     description="API para comparar respuestas del modelo emocional y ChatGPT.",
+)
+
+# Configuración CORS (permite personalizar orígenes mediante EMO_CORS_ORIGINS separados por comas).
+allowed_origins = os.environ.get("EMO_CORS_ORIGINS", "")
+if allowed_origins:
+    origins = [origin.strip() for origin in allowed_origins.split(",") if origin.strip()]
+else:
+    origins = ["*"]
+allow_credentials = origins != ["*"]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=allow_credentials,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 
@@ -102,7 +132,7 @@ async def compare_chat(req: ChatRequest):
     chatgpt_text: Optional[str] = None
     chatgpt_model: Optional[str] = None
 
-    client: Optional[OpenAI] = getattr(app.state, "openai_client", None)
+    client: Optional[object] = getattr(app.state, "openai_client", None)
     if client is None:
         warnings.append("OPENAI_API_KEY no está configurada; la comparación con ChatGPT está deshabilitada.")
     else:
@@ -112,23 +142,42 @@ async def compare_chat(req: ChatRequest):
         )
         try:
             # Ejecutamos la llamada bloqueante en un hilo para no frenar el loop de FastAPI.
-            response = await run_in_threadpool(
-                client.responses.create,
-                model=app.state.openai_model,
-                input=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_text},
-                ],
-            )
+            if hasattr(client, "responses"):
+                response = await run_in_threadpool(
+                    client.responses.create,
+                    model=app.state.openai_model,
+                    input=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_text},
+                    ],
+                )
+                chatgpt_model = getattr(response, "model", None)
+                try:
+                    chatgpt_text = response.output_text  # type: ignore[attr-defined]
+                except AttributeError:
+                    chatgpt_text = None
+                    warnings.append("No se pudo extraer la respuesta de ChatGPT.")
+            elif hasattr(client, "ChatCompletion"):
+                response = await run_in_threadpool(
+                    client.ChatCompletion.create,  # type: ignore[attr-defined]
+                    model=app.state.openai_model,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_text},
+                    ],
+                    temperature=req.temp,
+                )
+                chatgpt_model = response.get("model") if isinstance(response, dict) else None
+                try:
+                    choices = response.get("choices", [])  # type: ignore[union-attr]
+                    chatgpt_text = choices[0]["message"]["content"] if choices else None
+                except (KeyError, IndexError, TypeError):
+                    chatgpt_text = None
+                    warnings.append("No se pudo extraer la respuesta de ChatGPT.")
+            else:
+                warnings.append("La versión del SDK de OpenAI no es compatible.")
         except Exception as exc:  # noqa: BLE001 - capturamos errores de la librería OpenAI
             warnings.append(f"Error al consultar ChatGPT: {exc.__class__.__name__}")
-        else:
-            chatgpt_model = getattr(response, "model", None)
-            try:
-                chatgpt_text = response.output_text
-            except AttributeError:
-                chatgpt_text = None
-                warnings.append("No se pudo extraer la respuesta de ChatGPT.")
 
     return ChatResponse(
         input=user_text,
